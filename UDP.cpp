@@ -141,6 +141,7 @@ void connection::setIniMode()
 /***********************************************/
 ssize_t connection::sendData(string buf)
 {
+    
 }
 ssize_t connection::enviarData(char *buf, size_t count)
 {
