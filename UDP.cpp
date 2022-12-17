@@ -15,6 +15,9 @@
 #include <thread>   // std::thread, std::this_thread::sleep_for
 #include <chrono>   // std::chrono::seconds
 #include <string>
+#include "util.h"
+#include "File.h"
+#include "checksum.h"
 using namespace std;
 
 class connection
@@ -30,6 +33,7 @@ class connection
     unsigned int fix_len;
     char data_fj1[1100];
     int fj1;
+    int lastCorrectSqNumber;
 
 public:
     connection()
@@ -39,13 +43,15 @@ public:
         NumFlujo = 5;
         mode = 'S';
         puerto = 45000;
+        lastCorrectSqNumber = NumSec;
     }
 
     void setPort(int p) { puerto = 45000; };
     void setMode(char m) { mode = m; };
     void setIP(char *p_ip) { strcpy(ip, p_ip); };
     ssize_t enviarData(char *buf, size_t count);
-    ssize_t sendData(string buf);
+    ssize_t sendData(string data, int numMsg, int &seqNumber);
+    ssize_t sendFile(string filename);
     int recivirData(char *buf);
     void setServer(in_port_t puerto, char *buf);
     void setIniMode();
@@ -74,9 +80,14 @@ int main(int argc, char *argv[])
         cnn.setIniMode();
         // cnn.enviarData("A234567890B234567890C234567890D234567890F234567890", 50);
         // cnn.enviarData("AA34567890BB34567890CC34567890DD345", 35);
-        cnn.enviarData("X2345", 5);
-        ccn.sendData("X2345");
+        // cnn.enviarData("X2345", 5);
+        // ccn.sendData("X2345");
         // n = cnn.recivirData(buffer);
+        vector<string> filenames = getFilenames("files");
+        for (auto i : filenames)
+        {
+            cnn.sendFile("files/" + i);
+        }
     }
     else
     {
@@ -139,9 +150,34 @@ void connection::setIniMode()
     }
 }
 /***********************************************/
-ssize_t connection::sendData(string buf)
+ssize_t connection::sendFile(string filename)
 {
-    
+    File f(10);
+    f.setFilename(filename);
+    int numMsg = f.size / 10 + (f.size % 10 != 0);
+    int seqNumber = NumSec;
+    string buffData = f.read();
+    sendData(buffData, numMsg, seqNumber);
+    while (!f.endReached())
+    {
+        buffData = f.read();
+        sendData(buffData, numMsg, seqNumber);
+    }
+    return 0;
+}
+ssize_t connection::sendData(string data, int numMsg, int &seqNumber)
+{
+    int dataSize = data.size();
+    int currFlowNumber = static_cast<int>(NumFlujo);
+    seqNumber += dataSize;
+    int padding = 10 - dataSize;
+    int chs = checkSum(data);
+
+    string msg = normalize(seqNumber, 5) + intToString(currFlowNumber) + normalize(numMsg, 5) + normalizeMessage(data, 10) + normalize(padding, 3) + intToString(chs);
+
+    sendto(sockfd, msg.c_str(), msg.size(), MSG_CONFIRM, (const struct sockaddr *)&servaddr, sizeof(servaddr));
+
+    return 0;
 }
 ssize_t connection::enviarData(char *buf, size_t count)
 {
@@ -200,8 +236,8 @@ ssize_t connection::enviarData(char *buf, size_t count)
         // printf("%d:%d:%s\n",pi,pf,buffTmp);
 
         sprintf(buffer, "%05d%1d%05d%s%03d%1d", (int)NumSec, (int)l_NumFlujo, NumMsg, buffTmp, padding, 1);
-        sprintf(buffer, "%05d %1d %05d %s %03d %1d", (int)NumSec, (int)l_NumFlujo, NumMsg, buffTmp, padding, 1);
-        // printf(">>%s<<\n", buffer);
+        // sprintf(buffer, "%05d %1d %05d %s %03d %1d", (int)NumSec, (int)l_NumFlujo, NumMsg, buffTmp, padding, 1);
+        printf(">>%s<<\n", buffer);
         // re-calcular numero de secuencia
         NumSec = NumSec + pf;
         // send data over UDP

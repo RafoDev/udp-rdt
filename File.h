@@ -10,10 +10,12 @@ struct File
   string filename;
   int size;
   ifstream file;
-  File(){}
+  int pivot;
+  File(int _pivot = 10) { pivot = _pivot; }
   void setFilename(string _filename)
   {
     filename = _filename;
+    if(!std::filesystem::exists(filename)) perror("ERROR, file doesn't exist.\n");
     file.open(filename, ios::binary | ios::ate);
     if (!file)
       size = 0;
@@ -31,6 +33,10 @@ struct File
     file.read(buffer.data(), buffSize);
     string data(buffer.begin(), buffer.end());
     return data;
+  }
+  bool endReached()
+  {
+    return !size;
   }
 };
 
