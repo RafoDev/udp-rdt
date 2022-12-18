@@ -10,18 +10,29 @@ struct File
   string filename;
   int size;
   ifstream file;
+  ofstream fileW;
   int pivot;
+
   File(int _pivot = 10) { pivot = _pivot; }
-  void setFilename(string _filename)
+  void setReadFilename(string _filename)
   {
     filename = _filename;
-    if(!std::filesystem::exists(filename)) perror("ERROR, file doesn't exist.\n");
+    if (!std::filesystem::exists(filename))
+      perror("ERROR, file doesn't exist.\n");
     file.open(filename, ios::binary | ios::ate);
     if (!file)
       size = 0;
     else
       size = file.tellg();
     file.seekg(0, ios::beg);
+  }
+  void setWriteFilename(string _filename)
+  {
+    fileW.open(_filename);
+    if (!fileW)
+    {
+      cout << "File not created!";
+    }
   }
   string read()
   {
@@ -37,6 +48,11 @@ struct File
   bool endReached()
   {
     return !size;
+  }
+  void write(string &data)
+  {
+    fileW << data;
+    fileW.close();
   }
 };
 

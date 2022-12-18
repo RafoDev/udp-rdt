@@ -31,9 +31,14 @@ class connection
     char mode;
     struct sockaddr_in servaddr, cliaddr;
     unsigned int fix_len;
+    bool error;
     char data_fj1[1100];
     int fj1;
     int lastCorrectSqNumber;
+    string attach(int &seqNumber, int &currFlowNumber, int &numMsg, string &data, int &padding, int &chs);
+    void detach(string msg, int &seqNumber, int &currFlowNumber, int &numMsg, string &data, int &padding, int &chs);
+    bool checkIntegrity(string &msg, int &msgChs);
+    void sendFileName(string filename);
 
 public:
     connection()
@@ -44,13 +49,14 @@ public:
         mode = 'S';
         puerto = 45000;
         lastCorrectSqNumber = NumSec;
+        error = false;
     }
 
     void setPort(int p) { puerto = 45000; };
     void setMode(char m) { mode = m; };
     void setIP(char *p_ip) { strcpy(ip, p_ip); };
     ssize_t enviarData(char *buf, size_t count);
-    ssize_t sendData(string data, int numMsg, int &seqNumber);
+    ssize_t sendData(string data, int numMsg, int &seqNumber, int flag);
     ssize_t sendFile(string filename);
     int recivirData(char *buf);
     void setServer(in_port_t puerto, char *buf);
@@ -83,10 +89,10 @@ int main(int argc, char *argv[])
         // cnn.enviarData("X2345", 5);
         // ccn.sendData("X2345");
         // n = cnn.recivirData(buffer);
-        vector<string> filenames = getFilenames("files");
+        vector<string> filenames = getFilenames("client");
         for (auto i : filenames)
         {
-            cnn.sendFile("files/" + i);
+            cnn.sendFile(i);
         }
     }
     else
@@ -150,31 +156,57 @@ void connection::setIniMode()
     }
 }
 /***********************************************/
+
 ssize_t connection::sendFile(string filename)
 {
     File f(10);
-    f.setFilename(filename);
+    f.setReadFilename("client/" + filename);
     int numMsg = f.size / 10 + (f.size % 10 != 0);
     int seqNumber = NumSec;
-    string buffData = f.read();
-    sendData(buffData, numMsg, seqNumber);
+
+    sendData(filename, numMsg, seqNumber, 1);
+
+    string buffData;
     while (!f.endReached())
     {
         buffData = f.read();
-        sendData(buffData, numMsg, seqNumber);
+        sendData(buffData, numMsg, seqNumber, 2);
     }
     return 0;
 }
-ssize_t connection::sendData(string data, int numMsg, int &seqNumber)
+
+string connection::attach(int &seqNumber, int &currFlowNumber, int &numMsg, string &data, int &padding, int &chs)
+{
+    return normalize(seqNumber, 5) + intToString(currFlowNumber) + normalize(numMsg, 5) + normalizeMessage(data, 10) + normalize(padding, 3) + intToString(chs);
+}
+void connection::detach(string msg, int &seqNumber, int &currFlowNumber, int &numMsg, string &data, int &padding, int &chs)
+{
+    // cout << msg << " " << msg.size();
+    // contruir msg 5B(#sec)1B(#Flujo)5B(#msg)1000B(data)3B(padding)1B(CheckSum)
+    int i = 0;
+    seqNumber = stringToInt(msg.substr(i, 5));
+    i += 5;
+    currFlowNumber = stringToInt(msg.substr(i, 1));
+    i += 1;
+    numMsg = stringToInt(msg.substr(i, 5));
+    i += 5;
+    data = msg.substr(i, 10);
+    i += 10;
+    padding = stringToInt(msg.substr(i, 3));
+    i += 3;
+    chs = stringToInt(msg.substr(i, 1));
+    data = data.substr(0, 10 - padding);
+}
+
+ssize_t connection::sendData(string data, int numMsg, int &seqNumber, int flag = 0)
 {
     int dataSize = data.size();
-    int currFlowNumber = static_cast<int>(NumFlujo);
     seqNumber += dataSize;
     int padding = 10 - dataSize;
     int chs = checkSum(data);
 
-    string msg = normalize(seqNumber, 5) + intToString(currFlowNumber) + normalize(numMsg, 5) + normalizeMessage(data, 10) + normalize(padding, 3) + intToString(chs);
-
+    string msg = attach(seqNumber, flag, numMsg, data, padding, chs);
+    cout << "->" << msg << '\n';
     sendto(sockfd, msg.c_str(), msg.size(), MSG_CONFIRM, (const struct sockaddr *)&servaddr, sizeof(servaddr));
 
     return 0;
@@ -284,25 +316,73 @@ int connection::recivirData(char *buf)
     }
 }
 /***********************************************/
+bool connection::checkIntegrity(string &msg, int &msgChs)
+{
+    return checkSum(msg) == msgChs;
+}
 void connection::serverThread()
 {
     unsigned int len, n;
     char buffer[1100];
+    string msg;
+    int seqNumber;
+    int flag;
+    int numMsg;
+    string data;
+    int padding;
+    int chs;
+    string filename;
 
+    cout << "[CONNECTION:INFO] Waiting..." << endl;
     do
     {
-        cout << "[CONNECTION:INFO] Waiting..." << endl;
         len = sizeof(servaddr); // len is value/resuslt
+
         n = recvfrom(sockfd, (char *)buffer, fix_len,
                      MSG_WAITALL, (struct sockaddr *)&servaddr,
                      &len);
         buffer[n] = '\0';
-        // Biz logic ...  read a file .. process data ...
-        std::this_thread::sleep_for(std::chrono::seconds(1));
-        cout << "[CLIENT:MESSAGE] " << buffer << " | " << n << '\n';
-        n = sendto(sockfd, (const char *)buffer, fix_len,
-                   MSG_CONFIRM, (const struct sockaddr *)&servaddr,
-                   len);
+        detach(string(buffer), seqNumber, flag, numMsg, data, padding, chs);
+        if (flag == 1 || flag == 2)
+        {
+            if (flag == 1)
+            {
+                filename = data;
+                cout << "[CLIENT:INFO] A new file <" << filename << "> is being uploaded\n";
+            }
+            string fileData;
+            int i = 1;
+            while (numMsg)
+            {
+                n = recvfrom(sockfd, (char *)buffer, fix_len,
+                             MSG_WAITALL, (struct sockaddr *)&servaddr,
+                             &len);
+                buffer[n] = '\0';
+                int newFlag, newNumMsg;
+                detach(string(buffer), seqNumber, newFlag, newNumMsg, data, padding, chs);
+                fileData += data;
+                cout << "[CLIENT:MESSAGE] "<<i++<<"/"<<newNumMsg<<" "<<data<<'\n';
+                numMsg--;
+            }
+            File f;
+            f.setWriteFilename("server/" + filename);
+            f.write(fileData);
+            cout << "[CLIENT:INFO] File <" << filename << "> was uploaded successfully\n";
+        }
+        // if (checkIntegrity(data, chs))
+        // {
+        //     // Biz logic ...  read a file .. process data ...
+        //     // std::this_thread::sleep_for(std::chrono::seconds(1));
+        //     cout << "[CLIENT:MESSAGE] " << data << '\n';
+        // }
+        // else
+        // {
+        //     cout << "[CLIENT:ERROR] "
+        //          << "Error en envío en mensaje <" << seqNumber << ">" << '\n';
+        // }
+        // n = sendto(sockfd, (const char *)buffer, fix_len,
+        //            MSG_CONFIRM, (const struct sockaddr *)&servaddr,
+        //            len);
     } while (1);
 }
 /**********************************/
