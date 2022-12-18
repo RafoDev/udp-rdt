@@ -15,6 +15,8 @@
 #include <thread>   // std::thread, std::this_thread::sleep_for
 #include <chrono>   // std::chrono::seconds
 #include <string>
+#include <cstdlib>
+
 #include "util.h"
 #include "File.h"
 #include "checksum.h"
@@ -27,37 +29,38 @@ class connection
     in_port_t puerto;
     char ip[17];
     in_port_t NumFlujo;
-    size_t NumSec;
+    size_t seqNumber;
     char mode;
     struct sockaddr_in servaddr, cliaddr;
     unsigned int fix_len;
-    bool error;
     char data_fj1[1100];
     int fj1;
     int lastCorrectSqNumber;
-    string attach(int &seqNumber, int &currFlowNumber, int &numMsg, string &data, int &padding, int &chs);
-    void detach(string msg, int &seqNumber, int &currFlowNumber, int &numMsg, string &data, int &padding, int &chs);
-    bool checkIntegrity(string &msg, int &msgChs);
-    void sendFileName(string filename);
+    string filename;
+    string attach(int &currFlowNumber, int &numMsg, string &data, int &padding, int &chs);
+    int receiveAndDetach(string buffer, unsigned int *currSeqNumber, unsigned int *flag, unsigned int *numMsg, string *data, unsigned int *padding, unsigned int *chs);
+    void detach(string msg, unsigned int *currSeqNumber, unsigned int *currFlowNumber, unsigned int *numMsg, string *data, unsigned int *padding, unsigned int *chs);
+    bool checkIntegrity(string &msg, unsigned int &msgChs);
 
 public:
+    bool failed, success;
     connection()
     {
         fix_len = 25;
-        NumSec = 777;
+        seqNumber = 777;
         NumFlujo = 5;
         mode = 'S';
         puerto = 45000;
-        lastCorrectSqNumber = NumSec;
-        error = false;
+        failed = false;
+        success = false;
     }
 
     void setPort(int p) { puerto = 45000; };
     void setMode(char m) { mode = m; };
     void setIP(char *p_ip) { strcpy(ip, p_ip); };
     ssize_t enviarData(char *buf, size_t count);
-    ssize_t sendData(string data, int numMsg, int &seqNumber, int flag);
-    ssize_t sendFile(string filename);
+    ssize_t sendData(string data, int numMsg, int flag);
+    ssize_t sendFile(string _filename);
     int recivirData(char *buf);
     void setServer(in_port_t puerto, char *buf);
     void setIniMode();
@@ -92,7 +95,8 @@ int main(int argc, char *argv[])
         vector<string> filenames = getFilenames("client");
         for (auto i : filenames)
         {
-            cnn.sendFile(i);
+            while (!cnn.success)
+                cnn.sendFile(i);
         }
     }
     else
@@ -157,131 +161,150 @@ void connection::setIniMode()
 }
 /***********************************************/
 
-ssize_t connection::sendFile(string filename)
+ssize_t connection::sendFile(string _filename)
 {
-    File f(10);
-    f.setReadFilename("client/" + filename);
-    int numMsg = f.size / 10 + (f.size % 10 != 0);
-    int seqNumber = NumSec;
-
-    sendData(filename, numMsg, seqNumber, 1);
-
     string buffData;
+
+    filename = _filename;
+    File f;
+    f.setReadFilename("client/" + filename);
+    unsigned int numMsg = f.size / 10 + (f.size % 10 != 0);
+
+    sendData(filename, numMsg, 1);
+
     while (!f.endReached())
     {
         buffData = f.read();
-        sendData(buffData, numMsg, seqNumber, 2);
+        sendData(buffData, numMsg, 2);
     }
+
+    this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    success = !failed;
+    failed = false;
+
     return 0;
 }
 
-string connection::attach(int &seqNumber, int &currFlowNumber, int &numMsg, string &data, int &padding, int &chs)
+string connection::attach(int &currFlowNumber, int &numMsg, string &data, int &padding, int &chs)
 {
     return normalize(seqNumber, 5) + intToString(currFlowNumber) + normalize(numMsg, 5) + normalizeMessage(data, 10) + normalize(padding, 3) + intToString(chs);
 }
-void connection::detach(string msg, int &seqNumber, int &currFlowNumber, int &numMsg, string &data, int &padding, int &chs)
+
+int connection::receiveAndDetach(string buffer, unsigned int *currSeqNumber, unsigned int *flag, unsigned int *numMsg, string *data, unsigned int *padding, unsigned int *chs)
+{
+    unsigned int len = sizeof(servaddr);
+    char data_c[1100];
+    int n = recvfrom(sockfd, (char *)data_c, fix_len, MSG_WAITALL, (struct sockaddr *)&servaddr, &len);
+    // buffer[n] = '\0';
+    detach(string(data_c), currSeqNumber, flag, numMsg, data, padding, chs);
+    return n;
+}
+
+void connection::detach(string msg, unsigned int *currSeqNumber, unsigned int *currFlowNumber, unsigned int *numMsg, string *data, unsigned int *padding, unsigned int *chs)
 {
     // cout << msg << " " << msg.size();
     // contruir msg 5B(#sec)1B(#Flujo)5B(#msg)1000B(data)3B(padding)1B(CheckSum)
     int i = 0;
-    seqNumber = stringToInt(msg.substr(i, 5));
+    *currSeqNumber = stringToInt(msg.substr(i, 5));
     i += 5;
-    currFlowNumber = stringToInt(msg.substr(i, 1));
+    *currFlowNumber = stringToInt(msg.substr(i, 1));
     i += 1;
-    numMsg = stringToInt(msg.substr(i, 5));
+    *numMsg = stringToInt(msg.substr(i, 5));
     i += 5;
-    data = msg.substr(i, 10);
+    *data = msg.substr(i, 10);
     i += 10;
-    padding = stringToInt(msg.substr(i, 3));
+    *padding = stringToInt(msg.substr(i, 3));
     i += 3;
-    chs = stringToInt(msg.substr(i, 1));
-    data = data.substr(0, 10 - padding);
+    *chs = stringToInt(msg.substr(i, 1));
+    *data = data->substr(0, 10 - *padding);
 }
 
-ssize_t connection::sendData(string data, int numMsg, int &seqNumber, int flag = 0)
+ssize_t connection::sendData(string data, int numMsg, int flag = 0)
 {
     int dataSize = data.size();
     seqNumber += dataSize;
     int padding = 10 - dataSize;
     int chs = checkSum(data);
 
-    string msg = attach(seqNumber, flag, numMsg, data, padding, chs);
-    cout << "->" << msg << '\n';
+    string msg = attach(flag, numMsg, data, padding, chs);
+    // cout << "->" << msg << '\n';
     sendto(sockfd, msg.c_str(), msg.size(), MSG_CONFIRM, (const struct sockaddr *)&servaddr, sizeof(servaddr));
 
     return 0;
 }
-ssize_t connection::enviarData(char *buf, size_t count)
-{
-    // contruir msg 5B(#sec)1B(#Flujo)5B(#msg)1000B(data)3B(padding)1B(CheckSum)
 
-    /*
-    5B #Secc
-    1B #Flujo
-    V Data - 1000
-    1B CS
-    */
-    unsigned int len, n;
-    // calcular numero de flujo
-    in_port_t l_NumFlujo = NumFlujo++;
-    // calcular numero de msg
-    int NumMsg = 0;
-    NumMsg = (int)((count + 9) / 10);
+// ssize_t connection::enviarData(char *buf, size_t count)
+// {
+//     // contruir msg 5B(#sec)1B(#Flujo)5B(#msg)1000B(data)3B(padding)1B(CheckSum)
 
-    // split data in blocks of 1000
-    char buffer[1100], buffTmp[1001];
-    char *p = buf;
-    int pi = 0;
-    int pf = 0;
-    int ii, i, c = 0;
-    for (i = 0; i < count; i = i + 10)
-    {
-        if (count < 10)
-        {
-            pi = 0;
-            pf = count;
-        }
-        else if ((count - pi - (10 * c)) > 10)
-        {
-            pi = pi + (10 * c);
-            pf = 10;
-        }
-        else if ((count - pi - (10 * c)) < 10)
-        {
-            pi = pi + (10 * c);
-            pf = count - pi;
-        }
-        if (c == 0)
-            c++;
-        p = buf;
-        p = p + pi;
-        strncpy(buffTmp, p, pf);
-        buffTmp[pf] = '\0';
+//     /*
+//     5B #Secc
+//     1B #Flujo
+//     V Data - 1000
+//     1B CS
+//     */
+//     unsigned int len, n;
+//     // calcular numero de flujo
+//     in_port_t l_NumFlujo = NumFlujo++;
+//     // calcular numero de msg
+//     int NumMsg = 0;
+//     NumMsg = (int)((count + 9) / 10);
 
-        // Calcular padding
-        int padding = 10 - pf;
-        for (ii = 0; ii < padding; ii++)
-        {
-            buffTmp[pf + ii] = '0';
-            buffTmp[pf + ii + 1] = '\0';
-        }
-        // printf("%d:%d:%s\n",pi,pf,buffTmp);
+//     // split data in blocks of 1000
+//     char buffer[1100], buffTmp[1001];
+//     char *p = buf;
+//     int pi = 0;
+//     int pf = 0;
+//     int ii, i, c = 0;
+//     for (i = 0; i < count; i = i + 10)
+//     {
+//         if (count < 10)
+//         {
+//             pi = 0;
+//             pf = count;
+//         }
+//         else if ((count - pi - (10 * c)) > 10)
+//         {
+//             pi = pi + (10 * c);
+//             pf = 10;
+//         }
+//         else if ((count - pi - (10 * c)) < 10)
+//         {
+//             pi = pi + (10 * c);
+//             pf = count - pi;
+//         }
+//         if (c == 0)
+//             c++;
+//         p = buf;
+//         p = p + pi;
+//         strncpy(buffTmp, p, pf);
+//         buffTmp[pf] = '\0';
 
-        sprintf(buffer, "%05d%1d%05d%s%03d%1d", (int)NumSec, (int)l_NumFlujo, NumMsg, buffTmp, padding, 1);
-        // sprintf(buffer, "%05d %1d %05d %s %03d %1d", (int)NumSec, (int)l_NumFlujo, NumMsg, buffTmp, padding, 1);
-        printf(">>%s<<\n", buffer);
-        // re-calcular numero de secuencia
-        NumSec = NumSec + pf;
-        // send data over UDP
-        len = sizeof(servaddr);
-        n = sendto(sockfd, (const char *)buffer, strlen(buffer),
-                   MSG_CONFIRM, (const struct sockaddr *)&servaddr,
-                   len);
-        // cout << n << endl;
-    }
-    fflush(stdout);
-    return 0;
-}
+//         // Calcular padding
+//         int padding = 10 - pf;
+//         for (ii = 0; ii < padding; ii++)
+//         {
+//             buffTmp[pf + ii] = '0';
+//             buffTmp[pf + ii + 1] = '\0';
+//         }
+//         // printf("%d:%d:%s\n",pi,pf,buffTmp);
+
+//         sprintf(buffer, "%05d%1d%05d%s%03d%1d", (int)seqNum, (int)l_NumFlujo, NumMsg, buffTmp, padding, 1);
+//         // sprintf(buffer, "%05d %1d %05d %s %03d %1d", (int)NumSec, (int)l_NumFlujo, NumMsg, buffTmp, padding, 1);
+//         printf(">>%s<<\n", buffer);
+//         // re-calcular numero de secuencia
+//         NumSec = NumSec + pf;
+//         // send data over UDP
+//         len = sizeof(servaddr);
+//         n = sendto(sockfd, (const char *)buffer, strlen(buffer),
+//                    MSG_CONFIRM, (const struct sockaddr *)&servaddr,
+//                    len);
+//         // cout << n << endl;
+//     }
+//     fflush(stdout);
+//     return 0;
+// }
 
 /***********************************************/
 int connection::recivirData(char *buf)
@@ -316,59 +339,75 @@ int connection::recivirData(char *buf)
     }
 }
 /***********************************************/
-bool connection::checkIntegrity(string &msg, int &msgChs)
+bool connection::checkIntegrity(string &msg, unsigned int &msgChs)
 {
-    return checkSum(msg) == msgChs;
+    bool intentionalError = (rand() % 10) == 5;
+    if (intentionalError)
+    {
+        cout << "(intentional error)\n";
+        return false;
+    }
+    else
+    {
+        return checkSum(msg) == msgChs;
+    }
 }
+
 void connection::serverThread()
 {
-    unsigned int len, n;
-    char buffer[1100];
-    string msg;
-    int seqNumber;
-    int flag;
-    int numMsg;
-    string data;
-    int padding;
-    int chs;
-    string filename;
+    unsigned int len, n, currSeqNumber, flag, numMsg, padding, chs;
+    string buffer, msg, data, _filename;
 
     cout << "[CONNECTION:INFO] Waiting..." << endl;
     do
     {
-        len = sizeof(servaddr); // len is value/resuslt
-
-        n = recvfrom(sockfd, (char *)buffer, fix_len,
-                     MSG_WAITALL, (struct sockaddr *)&servaddr,
-                     &len);
-        buffer[n] = '\0';
-        detach(string(buffer), seqNumber, flag, numMsg, data, padding, chs);
-        if (flag == 1 || flag == 2)
+        receiveAndDetach(buffer, &currSeqNumber, &flag, &numMsg, &data, &padding, &chs);
+        switch (flag)
         {
-            if (flag == 1)
-            {
-                filename = data;
-                cout << "[CLIENT:INFO] A new file <" << filename << "> is being uploaded\n";
-            }
+        case 1:
+        {
             string fileData;
-            int i = 1;
+            unsigned int i = 1, newFlag, newNumMsg;
+
+            filename = data;
+            cout << "[CLIENT:INFO] A new file <" << filename << "> is being uploaded\n";
+
+            failed = false;
+
             while (numMsg)
             {
-                n = recvfrom(sockfd, (char *)buffer, fix_len,
-                             MSG_WAITALL, (struct sockaddr *)&servaddr,
-                             &len);
-                buffer[n] = '\0';
-                int newFlag, newNumMsg;
-                detach(string(buffer), seqNumber, newFlag, newNumMsg, data, padding, chs);
-                fileData += data;
-                cout << "[CLIENT:MESSAGE] "<<i++<<"/"<<newNumMsg<<" "<<data<<'\n';
+
+                receiveAndDetach(buffer, &currSeqNumber, &newFlag, &newNumMsg, &data, &padding, &chs);
+                if (!failed)
+                {
+                    if (checkIntegrity(data, chs))
+                    {
+                        fileData += data;
+                        cout << "[CLIENT:MESSAGE] " << i++ << "/" << newNumMsg << " " << data << '\n';
+                    }
+                    else
+                    {
+                        cout << "[CONNECTION:ERROR] "
+                             << "Error while sending " << i << "/" << newNumMsg << '\n';
+                        sendData(" ", 1, 5);
+                        failed = true;
+                    }
+                }
                 numMsg--;
             }
-            File f;
-            f.setWriteFilename("server/" + filename);
-            f.write(fileData);
-            cout << "[CLIENT:INFO] File <" << filename << "> was uploaded successfully\n";
+            if (!failed)
+            {
+                File f;
+                f.setWriteFilename("server/" + filename);
+                f.write(fileData);
+                cout << "[CLIENT:INFO] File <" << filename << "> was uploaded successfully\n";
+            }
+            break;
         }
+        default:
+            break;
+        }
+
         // if (checkIntegrity(data, chs))
         // {
         //     // Biz logic ...  read a file .. process data ...
@@ -388,21 +427,29 @@ void connection::serverThread()
 /**********************************/
 void connection::ReciveFromServerThread()
 {
-    unsigned int len, n;
-    char buffer[1100];
+    unsigned int len, n, currSeqNumber, flag, numMsg, padding, chs;
+    string buffer, msg, data, _filename;
     do
     {
-        len = sizeof(servaddr); // len is value/resuslt
-        n = recvfrom(sockfd, (char *)buffer, fix_len,
-                     MSG_WAITALL, (struct sockaddr *)&servaddr,
-                     &len);
+        // len = sizeof(servaddr); // len is value/resuslt
+        // n = recvfrom(sockfd, (char *)buffer, fix_len,
+        //              MSG_WAITALL, (struct sockaddr *)&servaddr,
+        //              &len);
         // cout << n << endl;
-        buffer[n] = '\0';
-        cout << "INFO -> " << buffer << '\n';
+        // buffer[n] = '\0';
+
+        receiveAndDetach(buffer, &currSeqNumber, &flag, &numMsg, &data, &padding, &chs);
+
+        if (flag == 5)
+        {
+            failed = true;
+        }
+
+        // cout << "INFO -> " << data << '\n';
         // procesar msg recivodo, como parte de un flujo
         // ejercicio de 1 msg de regreso del servidor
-        strcpy(data_fj1, buffer);
-        fj1 = 1;
+        // strcpy(data_fj1, buffer);
+        // fj1 = 1;
 
     } while (1);
 }
